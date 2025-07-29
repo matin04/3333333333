@@ -123,4 +123,121 @@ async def save_question(message: Message, state: FSMContext):
         task = Task(title=title, answer=answer, user_id=user.id, course_id=course.id)
         session.add(task)
         await session.commit()
-       
+
+
+@dp.message(F.text=='записаться на курс')
+async def show_courses_to_enroll(message: Message, state: FSMContext):
+    await state.clear()
+    async with async_session() as session:
+        courses = (await session.scalars(select(Course))).all()
+        if not courses:
+            await message.answer("Пока нет доступных курсов.")
+            return
+        buttons = []
+        for course in courses:
+            buttons.append([
+                InlineKeyboardButton(
+                    text=course.name_course,
+                    callback_data=f"student_{course.id}"
+                    )
+                    ])
+        markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.answer("Выберите курс для записи:", reply_markup=markup)
+
+
+@dp.callback_query(F.data.startswith('student_'))
+async def courses(callback: CallbackQuery):
+    course_id = int(callback.data.split('_')[1])
+    tg_id = callback.from_user.id
+
+    async with async_session() as session:
+        user = await session.scalar(select(User).filter_by(tg_id=tg_id))
+        if not user:
+            await callback.message.answer("Вы не зарегистрированы.")
+            return
+
+        exists = await session.scalar(
+            select(Student).filter_by(user_id=user.id, course_id=course_id)
+        )
+        if exists:
+            await callback.message.answer("Вы уже записаны на этот курс.")
+        else:
+            student = Student(user_id=user.id, course_id=course_id)
+            session.add(student)
+            await session.commit()
+            await callback.message.answer("Вы успешно записались на курс!")
+
+    await callback.answer()
+
+@dp.message(F.text=='добавить материал')
+async def start_add_material(message: Message, state: FSMContext):
+    await state.clear()
+    async with async_session() as session:
+        user = await session.scalar(select(User).filter_by(tg_id=message.from_user.id))
+        if user.is_admin==True:
+            await message.answer("Введите название материала:")
+            await state.set_state(MyStates.material_title)
+        else:
+            await message.answer("Только админ может добавлять материалы.")
+
+@dp.message(MyStates.material_title)
+async def material_name(message: Message, state: FSMContext):
+    await state.update_data(material_title=message.text)
+    await message.answer("Введите описание материала:")
+    await state.set_state(MyStates.material_description)
+
+@dp.message(MyStates.material_description)
+async def material_description(message: Message, state: FSMContext):
+    data = await state.get_data()
+    title = data['material_title']
+    description = message.text
+
+    async with async_session() as session:
+        user = await session.scalar(select(User).filter_by(tg_id=message.from_user.id))
+        course = await session.scalar(select(Course).filter_by(user_id=user.id).order_by(Course.created_at.desc()))
+        if not course:
+            await message.answer("Сначала добавьте курс.")
+            await state.clear()
+            return
+
+        material = Material(
+            course_id=course.id,
+            title=title,
+            description=description,
+        )
+        session.add(material)
+        await session.commit()
+
+    await message.answer("Материал добавлен.")
+    await state.clear()
+
+@dp.message(F.text == 'получить материалы')
+async def send_user_materials(message: Message):
+    async with async_session() as session:
+        user = await session.scalar(select(User).filter_by(tg_id=message.from_user.id))
+        if not user:
+            await message.answer("Сначала, зарегистрируйтесь")
+            return
+
+        student_courses = await session.scalars(
+            select(Student).filter_by(user_id=user.id)
+        )
+        courses_ids = [sc.course_id for sc in student_courses.all()]
+
+        if not courses_ids:
+            await message.answer("Вы пока не записаны ни на один курс.")
+            return
+        materials = await session.scalars(
+            select(Material).filter(Material.course_id.in_(courses_ids))
+        )
+        materials_list = materials.all()
+        if not materials_list:
+            await message.answer("Для ваших курсов пока нет материалов.")
+            return
+        
+        text = "Материалы для ваших курсов:\n\n"
+        for material in materials_list:
+            text += f"{material.title}\n{material.description}\n\n"
+        await message.answer(text)
+
+

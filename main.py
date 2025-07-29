@@ -9,7 +9,6 @@ from db import Base, User, engine, async_session,  Course,Task,Student,Material
 from random import choice
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 

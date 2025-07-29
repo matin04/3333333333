@@ -24,6 +24,8 @@ dp = Dispatcher()
 
 
 
+
+
 async def make_notadmin( ):
     async with async_session() as session:
         stmt = update(User).where(User.tg_id == 7101642329).values(is_admin=False)

@@ -241,3 +241,142 @@ async def send_user_materials(message: Message):
         await message.answer(text)
 
 
+
+@dp.message(F.text == 'сдать задание')
+async def start_exam(message: Message, state: FSMContext):
+    async with async_session() as session:
+        user = await session.scalar(select(User).filter_by(tg_id=message.from_user.id))
+        if not user:
+            await message.answer("Сначала зарегистрируйтесь.")
+            return
+
+        student_courses = await session.scalars(
+            select(Student).filter_by(user_id=user.id)
+        )
+        courses_list = student_courses.all()
+        if not courses_list:
+            await message.answer("Вы не записаны ни на один курс.")
+            return
+
+        buttons = []
+        for sc in courses_list:
+            course = await session.scalar(select(Course).filter_by(id=sc.course_id))
+            buttons.append([InlineKeyboardButton(text=course.name_course, callback_data=f"exam_{course.id}")])
+
+        markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.answer("Выберите курс для сдачи задания:", reply_markup=markup)
+
+
+@dp.callback_query(F.data.startswith('exam_'))
+async def exam_course_choice(callback: CallbackQuery, state: FSMContext):
+    course_id = int(callback.data.split('_')[1])
+    await state.update_data(course_id=course_id, current_task=0, answers=[])
+    
+    async with async_session() as session:
+        tasks = await session.scalars(select(Task).filter_by(course_id=course_id))
+        tasks_list = tasks.all()
+        if not tasks_list:
+            await callback.message.answer("В этом курсе нет заданий.")
+            await state.clear()
+            await callback.answer()
+            return
+        
+        await state.update_data(tasks=tasks_list)
+        first_task = tasks_list[0]
+        await callback.message.answer(f"Вопрос 1: {first_task.title}\nВведите ваш ответ:")
+        await state.set_state(MyStates.exam_answer)
+    await callback.answer()
+
+@dp.message(MyStates.exam_answer)
+async def process_exam_answer(message: Message, state: FSMContext):
+    data = await state.get_data()
+    tasks = data.get('tasks', [])
+    current_task = data.get('current_task', 0)
+    answers = data.get('answers', [])
+    answers.append(message.text)
+    current_task += 1
+    if current_task >= len(tasks):
+        await message.answer("Вы ответили на все вопросы. Спасибо!")
+        await state.clear()
+    else:
+        next_task = tasks[current_task]
+        await state.update_data(current_task=current_task, answers=answers)
+        await message.answer(f"Вопрос {current_task + 1}: {next_task.title}\nВведите ваш ответ:")
+
+
+
+
+@dp.message(F.text == 'проверка выполнения')
+async def check_progress(message: Message, state: FSMContext):
+    async with async_session() as session:
+        user = await session.scalar(select(User).filter_by(tg_id=message.from_user.id))
+        if not user or not user.is_admin:
+            await message.answer("Только админ может проверять выполнение заданий.")
+            return
+
+        courses = await session.scalars(select(Course).filter_by(user_id=user.id))
+        course_list = courses.all()
+        if not course_list:
+            await message.answer("У вас нет курсов.")
+            return
+
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=c.name_course, callback_data=f"checkcourse_{c.id}")]
+            for c in course_list
+        ])
+        await message.answer("Выберите курс для проверки:", reply_markup=markup)
+
+
+@dp.callback_query(F.data.startswith('checkcourse_'))
+async def show_students_in_course(callback: CallbackQuery):
+    course_id = int(callback.data.split('_')[1])
+    async with async_session() as session:
+        students = await session.scalars(select(Student).filter_by(course_id=course_id))
+        student_list = students.all()
+        if not student_list:
+            await callback.message.answer("На этот курс никто не записан.")
+            await callback.answer()
+            return
+
+        buttons = []
+        for s in student_list:
+            user = await session.scalar(select(User).filter_by(id=s.user_id))
+            buttons.append([InlineKeyboardButton(text=user.username, callback_data=f"progress_{course_id}_{user.id}")])
+
+        markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await callback.message.answer("Выберите студента для просмотра прогресса:", reply_markup=markup)
+        await callback.answer()
+
+
+@dp.callback_query(F.data.startswith('progress_'))
+async def show_progress(callback: CallbackQuery):
+    parts = callback.data.split('_')
+    course_id = int(parts[1])
+    user_id = int(parts[2])
+
+    async with async_session() as session:
+        user = await session.scalar(select(User).filter_by(id=user_id))
+        course = await session.scalar(select(Course).filter_by(id=course_id))
+        all_tasks = await session.scalars(select(Task).filter_by(course_id=course_id))
+        total_questions = len(all_tasks.all())
+
+        await callback.message.answer(
+            f"Студент: @{user.username}\nКурс: {course.name_course}\n"
+            f"Заданий в курсе: {total_questions}\n"
+            f"Ответов сдано: "
+        )
+        await callback.answer()
+
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+async def main():
+    await init_db()
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    asyncio.run(main())
+
+
